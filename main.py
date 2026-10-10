@@ -1,4 +1,5 @@
 import json
+from datetime import date
 import tkinter as tk
 import tkinter.messagebox as messagebox
 from pathlib import Path
@@ -50,6 +51,20 @@ STAT_NAMES = {
 # SAVE / GAME LOGIC
 # ============================================================
 
+def make_daily_quests():
+    return [
+        {"id": "training", "title": "Daily Training",
+         "description": "Complete a short workout or training session.",
+         "target": 1, "progress": 0, "reward_exp": 60, "claimed": False},
+        {"id": "focus", "title": "Focus Session",
+         "description": "Study or work with focus for at least 25 minutes.",
+         "target": 1, "progress": 0, "reward_exp": 50, "claimed": False},
+        {"id": "vitality", "title": "Vitality Check",
+         "description": "Take a short walk and drink some water.",
+         "target": 1, "progress": 0, "reward_exp": 40, "claimed": False},
+    ]
+
+
 def default_data():
     return {
         "player_name": "New Hunter",
@@ -57,10 +72,13 @@ def default_data():
         "exp": 0,
         "stat_points": 0,
         "stats": {"STR": 5, "AGI": 5, "INT": 5, "VIT": 5},
+        "quest_date": date.today().isoformat(),
+        "quests": make_daily_quests(),
     }
 
 
 def load_data():
+    """Load the save and add v1.2 fields without deleting older fields."""
     data = default_data()
     if not DATA_FILE.exists():
         return data
@@ -71,7 +89,6 @@ def load_data():
         if not isinstance(old, dict):
             raise ValueError("Save data must be a JSON object.")
 
-        # Keep old fields (quests, HP, MP, etc.) instead of deleting them.
         data.update(old)
         if "player_name" not in old and "name" in old:
             data["player_name"] = old["name"]
@@ -84,14 +101,34 @@ def load_data():
         for key in stats:
             if key in old:
                 stats[key] = old[key]
-        data["stats"] = {
-            key: max(0, int(value)) for key, value in stats.items()
-        }
+        data["stats"] = {key: max(0, int(value)) for key, value in stats.items()}
         data["level"] = max(1, int(data.get("level", 1)))
         data["exp"] = max(0, int(data.get("exp", 0)))
         data["stat_points"] = max(0, int(data.get("stat_points", 0)))
         if not isinstance(data.get("player_name"), str):
             data["player_name"] = "New Hunter"
+
+        today = date.today().isoformat()
+        saved_quests = old.get("quests", [])
+        if data.get("quest_date") != today or not isinstance(saved_quests, list):
+            data["quests"] = make_daily_quests()
+            data["quest_date"] = today
+        else:
+            defaults = {q["id"]: q for q in make_daily_quests()}
+            migrated = []
+            for saved in saved_quests:
+                if not isinstance(saved, dict):
+                    continue
+                quest_id = saved.get("id")
+                if quest_id in defaults:
+                    quest = dict(defaults[quest_id])
+                    quest["progress"] = min(quest["target"], max(0, int(saved.get("progress", 0))))
+                    quest["claimed"] = bool(saved.get("claimed", False))
+                    migrated.append(quest)
+            existing_ids = {q["id"] for q in migrated}
+            migrated.extend(q for q in make_daily_quests() if q["id"] not in existing_ids)
+            data["quests"] = migrated
+            data["quest_date"] = today
         return data
     except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
         raise RuntimeError(
@@ -151,6 +188,7 @@ class HunterApp(ctk.CTk):
         self.stat_labels = {}
         self.stat_buttons = {}
         self.status_values = {}
+        self.quest_widgets = {}
         self._scroll_target = 0.0
         self._scroll_animating = False
         self._wheel_bind_id = None
@@ -180,7 +218,7 @@ class HunterApp(ctk.CTk):
             font=("Consolas", 19, "bold"), text_color=C["purple_bright"]
         ).grid(row=0, column=0, padx=20, pady=(10, 0), sticky="w")
         ctk.CTkLabel(
-            header, text="HUNTER SYSTEM  /  PROTOCOL v1.1",
+            header, text="HUNTER SYSTEM  /  PROTOCOL v1.2",
             font=("Consolas", 9), text_color=C["muted"]
         ).grid(row=1, column=0, padx=21, pady=(0, 10), sticky="w")
 
@@ -219,13 +257,14 @@ class HunterApp(ctk.CTk):
         self._build_profile()
         self._build_attributes()
         self._build_status()
+        self._build_quests()
         self._build_actions()
 
         footer = ctk.CTkFrame(self, fg_color=C["header"], corner_radius=0)
         footer.grid(row=2, column=0, sticky="ew")
         ctk.CTkLabel(
             footer,
-            text="LOCAL SAVE ENABLED  •  SHADOW MONARCH SYSTEM",
+            text="DAILY QUESTS ONLINE  •  LOCAL SAVE ENABLED  •  v1.2",
             font=("Consolas", 9), text_color=C["muted"]
         ).pack(pady=6)
 
@@ -381,10 +420,124 @@ class HunterApp(ctk.CTk):
             row=4, column=0, padx=13, pady=(9, 12), sticky="ew"
         )
 
+    def _build_quests(self):
+        panel = self._panel(self.content)
+        self.quests_panel = panel
+        panel.grid(row=2, column=0, columnspan=2, sticky="ew",
+                   padx=14, pady=(4, 8))
+        panel.grid_columnconfigure(0, weight=1)
+
+        heading = ctk.CTkFrame(panel, fg_color="transparent")
+        heading.grid(row=0, column=0, padx=13, pady=(12, 3), sticky="ew")
+        heading.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            heading, text="DAILY QUESTS", font=("Consolas", 12, "bold"),
+            text_color=C["text"]
+        ).grid(row=0, column=0, sticky="w")
+        self.quest_day_label = ctk.CTkLabel(
+            heading, text="", font=("Consolas", 9), text_color=C["blue"]
+        )
+        self.quest_day_label.grid(row=0, column=1, sticky="e")
+        ctk.CTkLabel(
+            panel, text="Complete each real-life task once per day to earn EXP.",
+            font=("Segoe UI", 10), text_color=C["muted"]
+        ).grid(row=1, column=0, padx=13, pady=(0, 7), sticky="w")
+
+        self.quest_list = ctk.CTkFrame(panel, fg_color="transparent")
+        self.quest_list.grid(row=2, column=0, padx=9, pady=(0, 8), sticky="ew")
+        self.quest_list.grid_columnconfigure(0, weight=1)
+        self.render_quests()
+
+    def render_quests(self):
+        for child in self.quest_list.winfo_children():
+            child.destroy()
+        self.quest_widgets.clear()
+        quests = self.data.get("quests", [])
+        claimed_count = sum(1 for q in quests if q.get("claimed"))
+        self.quest_day_label.configure(text=f"{claimed_count}/{len(quests)} CLAIMED")
+
+        for row, quest in enumerate(quests):
+            card = ctk.CTkFrame(self.quest_list, fg_color=C["panel_alt"], corner_radius=9)
+            card.grid(row=row, column=0, padx=2, pady=4, sticky="ew")
+            card.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                card, text=quest["title"], font=("Segoe UI", 12, "bold"),
+                text_color=C["text"], anchor="w"
+            ).grid(row=0, column=0, padx=11, pady=(8, 0), sticky="ew")
+            ctk.CTkLabel(
+                card, text=quest["description"], font=("Segoe UI", 10),
+                text_color=C["muted"], anchor="w", wraplength=600, justify="left"
+            ).grid(row=1, column=0, padx=11, pady=(1, 7), sticky="ew")
+
+            right = ctk.CTkFrame(card, fg_color="transparent")
+            right.grid(row=0, column=1, rowspan=2, padx=10, pady=6, sticky="e")
+            ctk.CTkLabel(
+                right, text=f"+{quest['reward_exp']} EXP",
+                font=("Consolas", 10, "bold"), text_color=C["blue"]
+            ).pack(pady=(0, 4))
+            claimed = bool(quest.get("claimed"))
+            button = ctk.CTkButton(
+                right, text="COMPLETED" if claimed else "COMPLETE",
+                width=100, height=28, corner_radius=7,
+                font=("Consolas", 9, "bold"),
+                fg_color=C["panel_hover"] if claimed else C["purple"],
+                hover_color=C["purple_hover"], state="disabled" if claimed else "normal",
+                command=lambda quest_id=quest["id"]: self.complete_quest(quest_id)
+            )
+            button.pack()
+            self.quest_widgets[quest["id"]] = button
+
+    def complete_quest(self, quest_id):
+        quest = next((q for q in self.data.get("quests", [])
+                      if q.get("id") == quest_id), None)
+        if quest is None or quest.get("claimed"):
+            return
+
+        before = json.loads(json.dumps(self.data))
+        quest["progress"] = quest.get("target", 1)
+        quest["claimed"] = True
+        old_level = self.data["level"]
+        self.data["exp"] += int(quest.get("reward_exp", 0))
+        levels_gained = 0
+        while self.data["exp"] >= exp_required(self.data["level"]):
+            self.data["exp"] -= exp_required(self.data["level"])
+            self.data["level"] += 1
+            self.data["stat_points"] += 5
+            levels_gained += 1
+
+        try:
+            save_data(self.data)
+        except OSError as exc:
+            self.data = before
+            messagebox.showerror("Save Error", f"Không thể lưu nhiệm vụ:\n{exc}")
+            self.refresh_ui()
+            self.render_quests()
+            return
+
+        self.refresh_ui()
+        self.render_quests()
+        if levels_gained:
+            self.system_message.configure(
+                text=f"LEVEL UP  •  {old_level} → {self.data['level']}",
+                text_color=C["gold"]
+            )
+            self.show_toast(
+                "✦ LEVEL UP ✦",
+                f"Quest complete: {quest['title']}\nLevel {old_level} → {self.data['level']}  |  "
+                f"+{levels_gained * 5} attribute points",
+                level_up=True
+            )
+        else:
+            self.system_message.configure(
+                text=f"QUEST COMPLETE  •  +{quest['reward_exp']} EXP",
+                text_color=C["green"]
+            )
+            self.show_toast("QUEST COMPLETE", f"{quest['title']}\n+{quest['reward_exp']} EXP")
+
     def _build_actions(self):
         actions = ctk.CTkFrame(self.content, fg_color="transparent")
         self.actions_panel = actions
-        actions.grid(row=2, column=0, columnspan=2, sticky="ew",
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew",
                      padx=14, pady=(4, 14))
         actions.grid_columnconfigure((0, 1), weight=1)
 
@@ -399,6 +552,50 @@ class HunterApp(ctk.CTk):
             fg_color=C["panel_alt"], hover_color=C["panel_hover"],
             command=self.save_progress
         ).grid(row=0, column=1, padx=(5, 0), sticky="ew")
+
+        ctk.CTkButton(
+            actions, text="RESET LEVEL", height=32, corner_radius=9,
+            fg_color=C["danger"] if "danger" in C else "#8B2E3C",
+            hover_color="#A83A4A",
+            command=self.reset_level
+        ).grid(row=1, column=0, columnspan=2, padx=0, pady=(8, 0), sticky="ew")
+
+    def reset_level(self):
+        confirmed = messagebox.askyesno(
+            "Reset Hunter Level",
+            "Reset character progression?\\n\\n"
+            "Level will return to 1, EXP and unspent points will become 0, "
+            "and STR / AGI / INT / VIT will return to 5.\\n\\n"
+            "Daily quest completion will NOT be reset. This cannot be undone "
+            "unless you restore hunter_data.json.\\n\\nContinue?"
+        )
+        if not confirmed:
+            return
+
+        before = json.loads(json.dumps(self.data))
+        self.data["level"] = 1
+        self.data["exp"] = 0
+        self.data["stat_points"] = 0
+        for stat in ("STR", "AGI", "INT", "VIT"):
+            self.data.setdefault("stats", {})[stat] = 5
+
+        try:
+            save_data(self.data)
+        except (OSError, TypeError, ValueError) as exc:
+            self.data = before
+            messagebox.showerror("Save Error", f"Could not save reset progress:\\n{exc}")
+            self.refresh_ui()
+            return
+
+        self.refresh_ui()
+        self.system_message.configure(
+            text="HUNTER PROGRESSION RESET  •  LEVEL 1",
+            text_color=C["gold"]
+        )
+        self.show_toast(
+            "SYSTEM RESET",
+            "Level returned to 1. Attributes and EXP have been reset."
+        )
 
     # --------------------------------------------------------
     # SMOOTH SCROLL
@@ -493,7 +690,8 @@ class HunterApp(ctk.CTk):
             self.status_panel.grid_configure(
                 row=2, column=0, columnspan=2, padx=14, pady=6, sticky="ew"
             )
-            self.actions_panel.grid_configure(row=3, column=0, columnspan=2)
+            self.quests_panel.grid_configure(row=3, column=0, columnspan=2)
+            self.actions_panel.grid_configure(row=4, column=0, columnspan=2)
         else:
             self.attributes_panel.grid_configure(
                 row=1, column=0, columnspan=1, padx=(14, 6), pady=8,
@@ -503,7 +701,8 @@ class HunterApp(ctk.CTk):
                 row=1, column=1, columnspan=1, padx=(6, 14), pady=8,
                 sticky="nsew"
             )
-            self.actions_panel.grid_configure(row=2, column=0, columnspan=2)
+            self.quests_panel.grid_configure(row=2, column=0, columnspan=2)
+            self.actions_panel.grid_configure(row=3, column=0, columnspan=2)
 
     # --------------------------------------------------------
     # NOTIFICATIONS, SOUND, EFFECTS
